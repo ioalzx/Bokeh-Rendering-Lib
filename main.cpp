@@ -12,6 +12,7 @@
 #include <shared_mutex>
 #include <thread>
 #include <cmath>
+#include <vector>
 #include "opencv2/cudaimgproc.hpp"
 #include "opencv2/cudawarping.hpp"
 #include <opencv2/cudaarithm.hpp>
@@ -89,11 +90,7 @@ Mat bokeh_rendering( string input_path, string depth_map_path, double f_depth, d
 
     double DoF = compute_dof(f_depth, weight_dof);
 
-
-
-
     tbb::parallel_for(0, img.rows, [&](int i){
-//        cout << i << endl;
         tbb::parallel_for(0, img.cols, [&](int j){
             double p_depth = depth_map.at<double>( i, j );
             double d_p_coc = compute_coc( p_depth, f_depth, DoF, weight_coc );
@@ -129,10 +126,6 @@ Mat bokeh_rendering( string input_path, string depth_map_path, double f_depth, d
 
             mask.convertTo(mask, CV_8U);
 
-
-
-
-
             Mat w_color_map = Mat( Size( (maxy+1-miny), (maxx+1-minx) ), CV_64FC3, Scalar(1., 1., 1.) );
             Mat w_color_map_masked;
             w_color_map.copyTo( w_color_map_masked, mask);
@@ -167,9 +160,6 @@ Mat bokeh_rendering( string input_path, string depth_map_path, double f_depth, d
     });
 
 
-
-
-
     Mat result = (img + blur_layer) / w;
     cv::pow(result, 1./3., result);
 
@@ -179,40 +169,89 @@ Mat bokeh_rendering( string input_path, string depth_map_path, double f_depth, d
 }
 
 
-int main() {
+Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_depth, double weight_coc = 0.05, double weight_dof = 1, string kernel_path = "", int level = 10 ) {
 
+    Mat depth_map = imread( depth_map_path, IMREAD_GRAYSCALE );
+    depth_map.convertTo(depth_map, CV_64F);
+    depth_map = 1 - (depth_map / 255.);
+
+    Mat kernel = imread(kernel_path,IMREAD_GRAYSCALE);
+    cv::flip(kernel, kernel, -1);
+
+    Mat img = imread( input_path, CV_64F );
+    img.convertTo(img, CV_64F);
+
+    cv::pow(img, 3., img);
+
+    std::vector<Mat> src(level), result(level);
+
+    double DoF = compute_dof(f_depth, weight_dof);
+
+    tbb::parallel_for(0, level, [&](int i){
+        double lbound, hbound;
+        lbound = 1./double(level) * i;
+        hbound = 1./double(level) * (i + 1);
+
+        Mat mask;
+        cv::inRange( depth_map, lbound, hbound, mask );
+        mask.convertTo(mask, CV_8U);
+
+        img.copyTo( src.at(i), mask);
+        src.at(i).convertTo(src.at(i), CV_64F);
+
+        double d_p_coc = compute_coc( (lbound + hbound)/2, f_depth, DoF, weight_coc );
+        int p_coc = int(d_p_coc * ( img.size[0] + img.size[1] ) * 0.5);
+        if ( p_coc == 0 || p_coc == 1 ) {
+            result.at(i) = src.at(i).clone();
+            return ;
+        }
+        if ( p_coc % 2 ==0 ) {
+            p_coc += 1;
+        }
+
+        Mat k;
+
+        resize(kernel,k,Size(p_coc, p_coc),0,0,INTER_LINEAR);
+        k.convertTo(k, CV_64F);
+
+        k = k / cv::sum(k  )[0] ;
+
+        cv::filter2D(src.at(i), result.at(i), -1, k);
+
+        result.at(i).convertTo(result.at(i), CV_64F);
+    });
+
+    Mat final_result = result.at(0).clone();
+
+    final_result.convertTo(final_result, CV_64F);
+
+
+    for( int i = 1; i < level; i ++  ) {
+
+        final_result += result.at(i);
+    }
+
+    cv::pow(final_result, 1./3., final_result);
+
+    final_result.convertTo(final_result, CV_8U);
+
+    return final_result;
+
+}
+
+
+int main() {
 
     clock_t start,end;
     start=clock();
-    Mat result = bokeh_rendering("H:\\ECE496\\blur\\Bokeh_from_depth\\source_small.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth_small.png", 0.5, 0.06 ,1, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_2.png");
+    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\source.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth.png", 0.9, 0.06 ,1, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_2.png", 20);
     end=clock();
     cout<<"Time spent: "<<(double)(end-start)/CLOCKS_PER_SEC<<endl;
-
-
 
     imshow("Image", result);
     waitKey(0);
 
     imwrite("H:\\ECE496\\blur\\Bokeh_from_depth\\result.png", result);
-
-//    Mat a = Mat::ones(Size(5,5), CV_64F);
-
-//    a(Range(0,3), Range(0, 3)).forEach<double>([](double &p, const int * position) -> void {
-//        p += 1;
-//        cout<< position[0] << endl;
-//    });
-//
-//    cout << a << endl;
-
-
-
-//    tbb::parallel_for(0, 10, 1, [](int n) -> void {
-//        cout << n << endl;
-//    });
-
-
-
-
 
     return 0;
 }
