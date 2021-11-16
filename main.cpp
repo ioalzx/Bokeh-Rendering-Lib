@@ -173,7 +173,8 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
 
     cv::pow(img, bokeh_level, img);
 
-    std::vector<Mat> src(level), result(level);
+    std::vector<Mat> src(level), result(level), level_mask(level);
+    Mat aggregate_mask;
 
     double DoF = compute_dof(f_depth, weight_dof);
 
@@ -193,6 +194,15 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
         };
 
         mask.convertTo(mask, CV_8U);
+        mask.copyTo(level_mask.at(i));
+    });
+
+    tbb::parallel_for(0, level, [&](int i){
+        double lbound, hbound;
+        lbound = 1./double(level) * i;
+        hbound = 1./double(level) * (i + 1);
+
+        Mat mask = level_mask.at(i);
 
         img.copyTo( src.at(i));
         src.at(i).convertTo(src.at(i), CV_64F);
@@ -207,6 +217,7 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
             p_coc += 1;
         }
 
+
         Mat k;
 
         resize(kernel,k,Size(p_coc, p_coc),0,0,INTER_LINEAR);
@@ -217,7 +228,6 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
         Mat inter_result;
 
         cv::filter2D(src.at(i), inter_result, -1, k);
-
 
         Mat masked_img_1 = img.clone();
 
@@ -231,6 +241,29 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
 
         Mat blur_edge_mask;
         cv::inRange(masked_blur_img, Scalar(0.001, 0.001, 0.001), Scalar(DBL_MAX, DBL_MAX, DBL_MAX), blur_edge_mask );
+
+        tbb::spin_rw_mutex blur_edge_m;
+
+        tbb::parallel_for(0, i, [&](int j) {
+
+            double j_lbound, j_hbound, j_depth;
+            j_lbound = 1./double(level) * j;
+            j_hbound = 1./double(level) * (j + 1);
+            j_depth = (j_lbound + j_hbound)/2;
+
+            if (  j_depth + 2./level < (lbound + hbound)/2 ) {
+                Mat not_mask_j;
+                cv::bitwise_not(level_mask.at(j), not_mask_j);
+
+                blur_edge_m.lock();
+
+                cv::bitwise_and(  not_mask_j, blur_edge_mask, blur_edge_mask );
+
+                blur_edge_m.unlock();
+            }
+
+
+        });
 
         inter_result.copyTo(result.at(i), blur_edge_mask);
 
@@ -260,8 +293,6 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
         w_m.unlock();
 
 
-
-
     });
 
     Mat final_result = result.at(0).clone();
@@ -272,7 +303,6 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
 
         final_result += result.at(i);
     }
-
 
     final_result = final_result / w;
 
@@ -289,11 +319,12 @@ int main() {
 
     clock_t start,end;
     start=clock();
-    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\street.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth_street.png", 0.5, 0.06 ,1, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_1.png", 48);
+    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\people.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth_people.png", 0.9, 0.02 ,1, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_3.png", 24);
     end=clock();
     cout<<"Time spent: "<<(double)(end-start)/CLOCKS_PER_SEC<<endl;
 
     imwrite("H:\\ECE496\\blur\\Bokeh_from_depth\\result.png", result);
+
 
 
     return 0;
