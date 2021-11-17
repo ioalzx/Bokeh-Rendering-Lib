@@ -161,7 +161,7 @@ Mat bokeh_rendering( string input_path, string depth_map_path, double f_depth, d
 }
 
 
-Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_depth, double weight_coc = 0.05, double weight_dof = 1, string kernel_path = "", int level = 12, double bokeh_level = 3 ) {
+Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_depth, double weight_coc = 0.05, double weight_dof = 1, string kernel_path = "", int level = 12, double bokeh_level = 3, double cover = 1 ) {
 
     Mat depth_map = imread( depth_map_path, IMREAD_GRAYSCALE );
     depth_map.convertTo(depth_map, CV_64F);
@@ -177,20 +177,60 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
 
     cv::pow(img, bokeh_level, img);
 
-    std::vector<Mat> src(level), result(level), level_mask(level) ;
+    struct level_info {
+        double lbound;
+        double hbound;
+        int coc;
+        level_info(double Lbound, double Hbound, int Coc) {
+            lbound = Lbound; hbound = Hbound; coc = Coc;
+        }
+    };
+
+
+    std::vector<level_info> level_infos;
     Mat aggregate_mask;
 
     double DoF = compute_dof(f_depth, weight_dof);
 
     Mat w = Mat(cv::Size(img.size[1], img.size[0]), CV_64FC3, Scalar(1. ,1., 1.));
 
-    tbb::parallel_for(0, level, [&](int i){
+    int level_count = 0;
+    for ( int i = 0; i < level; i ++ ) {
         double lbound, hbound;
         lbound = 1./double(level) * i;
         hbound = 1./double(level) * (i + 1);
 
+        double d_p_coc = compute_coc( (lbound + hbound)/2, f_depth, DoF, weight_coc );
+        int p_coc = int(d_p_coc * ( img.size[0] + img.size[1] ) * 0.5);
+        if ( p_coc == 0 || p_coc == 1 ) {
+            p_coc = 0;
+        }
+        if ( p_coc % 2 ==0 ) {
+            p_coc += 1;
+        }
+
+        if ( i == 0 ) {
+            level_infos.emplace_back( lbound, hbound, p_coc );
+            level_count ++;
+        }
+        else if (  p_coc == level_infos[level_count - 1].coc  ) {
+            level_infos[level_count - 1].hbound = hbound;
+        }
+        else {
+            level_infos.emplace_back( lbound, hbound, p_coc );
+            level_count ++;
+        }
+
+    }
+
+    std::vector<Mat> src(level_count), result(level_count), level_mask(level_count);
+
+    tbb::parallel_for(0, level_count, [&](int i){
+        double lbound = level_infos.at(i).lbound;
+        double hbound = level_infos.at(i).hbound;
+
         Mat mask;
-        if ( i != level - 1) {
+        if ( i != level_count - 1) {
             cv::inRange( depth_map, lbound, hbound-0.00001, mask );
         }
         else {
@@ -201,25 +241,15 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
         mask.copyTo(level_mask.at(i));
     });
 
-    tbb::parallel_for(0, level, [&](int i){
-        double lbound, hbound;
-        lbound = 1./double(level) * i;
-        hbound = 1./double(level) * (i + 1);
+    tbb::parallel_for(0, level_count, [&](int i){
+        double lbound = level_infos.at(i).lbound;
+        double hbound = level_infos.at(i).hbound;
+        int p_coc = level_infos.at(i).coc;
 
         Mat mask = level_mask.at(i);
 
         img.copyTo( src.at(i));
         src.at(i).convertTo(src.at(i), CV_64F);
-
-        double d_p_coc = compute_coc( (lbound + hbound)/2, f_depth, DoF, weight_coc );
-        int p_coc = int(d_p_coc * ( img.size[0] + img.size[1] ) * 0.5);
-        if ( p_coc == 0 || p_coc == 1 ) {
-            src.at(i).copyTo(result.at(i), mask);
-            return ;
-        }
-        if ( p_coc % 2 ==0 ) {
-            p_coc += 1;
-        }
 
         Mat k;
         resize(kernel,k,Size(p_coc, p_coc),0,0,INTER_LINEAR);
@@ -244,11 +274,12 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
         tbb::parallel_for(0, i, [&](int j) {
 
             double j_lbound, j_hbound, j_depth;
-            j_lbound = 1./double(level) * j;
-            j_hbound = 1./double(level) * (j + 1);
+            j_lbound = level_infos.at(j).lbound;
+            j_hbound = level_infos.at(j).hbound;
+
             j_depth = (j_lbound + j_hbound)/2;
 
-            if (  j_depth + 2./level < (lbound + hbound)/2 ) {
+            if (  j_depth + 2./level_count * cover < (lbound + hbound)/2 ) {
                 Mat not_mask_j;
                 cv::bitwise_not(level_mask.at(j), not_mask_j);
 
@@ -282,7 +313,7 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
 
     final_result.convertTo(final_result, CV_64F);
 
-    for( int i = 1; i < level; i ++  ) {
+    for( int i = 1; i < level_count; i ++  ) {
 
         final_result += result.at(i);
 
@@ -303,7 +334,7 @@ int main() {
 
     clock_t start,end;
     start=clock();
-    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\people.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth_people.png", 0.2, 0.02 ,2, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_2.png", 12);
+    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\source.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth.png", 0.4, 0.08 ,2, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_4.png", 12);
     end=clock();
     cout<<"Time spent: "<<(double)(end-start)/CLOCKS_PER_SEC<<endl;
 
