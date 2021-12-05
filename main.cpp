@@ -38,7 +38,7 @@ Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_d
 
 int main() {
 
-    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\source.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth.png", 0.2, 0.02 ,1, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_6.png", 12, 3, 1);
+    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\people.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth_people.png", 0.9, 0.1 ,2, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_6.png", 12, 3, 1);
 
 
     imwrite("H:\\ECE496\\blur\\Bokeh_from_depth\\result.png", result);

@@ -15,8 +15,6 @@ struct level_info {
 
 
 
-
-
 Mat create_circular_mask( int c , double r) {
 
     int center = int( double(c) / 2 );
@@ -74,8 +72,6 @@ uchar* bokeh_rendering_approx_h( int rows, int cols, uchar* img_src_p, uchar* de
     Mat depth_map = Mat(rows,cols,CV_64F,depth_map_src_p);
     depth_map = 1 - (depth_map / 255.);
 
-    tbb::spin_rw_mutex w_m, r_m;
-
     Mat kernel = imread(kernel_path,IMREAD_GRAYSCALE);
     cv::flip(kernel, kernel, -1);
 
@@ -87,8 +83,6 @@ uchar* bokeh_rendering_approx_h( int rows, int cols, uchar* img_src_p, uchar* de
     Mat aggregate_mask;
 
     double DoF = compute_dof(f_depth, weight_dof);
-
-    Mat w = Mat(cv::Size(img.size[1], img.size[0]), CV_64FC3, Scalar(1. ,1., 1.));
 
 
     int level_count = 0;
@@ -121,9 +115,9 @@ uchar* bokeh_rendering_approx_h( int rows, int cols, uchar* img_src_p, uchar* de
     }
 
 
-    std::vector<Mat> src(level_count), result(level_count), level_mask(level_count), level_notmask(level_count);
+    std::vector<Mat> src(level_count), result(level_count), level_mask(level_count), level_notmask(level_count), blur_mask(level_count);
 
-
+// Calculate mask for each depth
     tbb::parallel_for(0, level_count, [&](int i){
         double lbound = level_infos.at(i).lbound;
         double hbound = level_infos.at(i).hbound;
@@ -141,102 +135,63 @@ uchar* bokeh_rendering_approx_h( int rows, int cols, uchar* img_src_p, uchar* de
     });
 
 
-    for ( int i = 0; i < level_count; i ++ ) {
-
-        if ( i == 0 ) {
-            Mat not_mask_i;
-            cv::bitwise_not(level_mask.at(i), not_mask_i);
-
-            not_mask_i.copyTo(level_notmask.at(i));
-            continue;
-        }
-
-
-
-        Mat not_mask_i;
-        cv::bitwise_not(level_mask.at(i), not_mask_i);
-
-        cv::bitwise_and(  not_mask_i, level_notmask.at(i - 1), level_notmask.at(i) );
-
-    }
-
-
-    Mat final_result = Mat(cv::Size(img.size[1], img.size[0]), CV_64FC3, Scalar(0. ,0., 0.));
-
     tbb::parallel_for(0, level_count, [&](int i){
 
         int p_coc = level_infos.at(i).coc;
-
         Mat mask = level_mask.at(i);
 
         img.copyTo( src.at(i));
         src.at(i).convertTo(src.at(i), CV_64F);
-
 
         Mat k;
         resize(kernel,k,Size(p_coc, p_coc),0,0,INTER_LINEAR);
         k.convertTo(k, CV_64F);
         k = k / cv::sum(k  )[0] ;
 
-        Mat inter_result;
-//        src.at(i).copyTo(inter_result, mask);
-        cv::filter2D(src.at(i), inter_result, -1, k);
+        cv::filter2D(src.at(i), result.at(i), -1, k);
+        cv::pow(result.at(i), 1./bokeh_level, result.at(i));
+        result.at(i).convertTo(result.at(i),CV_16S);
 
-
-        Mat masked_img_1 = img.clone();
         Mat masked_img;
-        masked_img_1.convertTo(masked_img_1,CV_64FC3, 1, 10);
-        masked_img_1.copyTo(masked_img, mask);
 
-        Mat chan[3];
-        cv::split(masked_img, chan);
-
-        masked_img = (chan[0] + chan[1] + chan[2] )/3;
-
+        mask.convertTo( masked_img, CV_64F );
 
 
         Mat masked_blur_img;
-//        masked_img.copyTo(masked_blur_img, mask);
+
         cv::filter2D(masked_img, masked_blur_img, -1, k);
 
 
-
-        Mat blur_edge_mask;
-//        cv::inRange(masked_blur_img, Scalar(0.0001, 0.0001, 0.0001), Scalar(DBL_MAX, DBL_MAX, DBL_MAX), blur_edge_mask );
-        cv::inRange(masked_blur_img, Scalar(0.0001), Scalar(DBL_MAX), blur_edge_mask );
-
-
-        if ( i != 0 ) {
-            cv::bitwise_and(  level_notmask.at(i - 1), blur_edge_mask, blur_edge_mask );
-        }
-
-
-        inter_result.copyTo(result.at(i), blur_edge_mask);
-
-        r_m.lock();
-        final_result += result.at(i);
-        r_m.unlock();
-
-        Mat outer_mask;
-        cv::bitwise_and(  blur_edge_mask, level_notmask.at(i), outer_mask );
-
-        Mat outer_mask_3d;
-        Mat in[] = {outer_mask, outer_mask, outer_mask};
-        merge(in, 3, outer_mask_3d);
-        outer_mask_3d.convertTo(outer_mask_3d, CV_64F, 1./255.);
-
-        w_m.lock();
-        w += outer_mask_3d;
-        w_m.unlock();
+        cv::inRange(masked_blur_img, Scalar(0.0001), Scalar(DBL_MAX), blur_mask.at(i) );
 
 
     });
 
 
-    final_result = final_result / w;
+
+    Mat final_result = result.at(0);
+    Mat c_mask = blur_mask.at(0);
+    detail::MultiBandBlender blender(false, 2 );
+//    detail::Blender blender;
+    blender.prepare(Rect(0, 0, final_result.size().width, final_result.size().height));
+    blender.feed(final_result, c_mask, Point2f (0,0));
+    for ( int i = 1; i < level_count; i ++ ) {
+
+        Mat in_mask; cv::bitwise_not(c_mask, in_mask);
 
 
-    cv::pow(final_result, 1./bokeh_level, final_result);
+        cv::bitwise_and( in_mask, blur_mask.at(i), in_mask );
+
+        blender.feed(result.at(i), in_mask, Point2f (0,0));
+
+
+        cv::bitwise_or( c_mask, blur_mask.at(i), c_mask );
+
+
+    }
+
+    blender.blend(final_result, Mat(cv::Size(final_result.size[1], final_result.size[0]), CV_8U, Scalar(255)));
+
     final_result.convertTo(final_result, CV_8U);
 
 
