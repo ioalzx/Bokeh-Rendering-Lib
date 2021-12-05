@@ -1,344 +1,49 @@
 // main.cpp
-
-#include <tbb/blocked_range.h>
-#include <tbb/parallel_for.h>
-#include <tbb/parallel_reduce.h>
-#include <tbb/spin_rw_mutex.h>
 #include <iostream>
 #include <opencv2/opencv.hpp>
-#include <algorithm>
 #include<ctime>
 #include <mutex>
-#include <shared_mutex>
-#include <thread>
-#include <cmath>
-#include <vector>
-#include "opencv2/cudaimgproc.hpp"
-#include "opencv2/cudawarping.hpp"
-#include <opencv2/cudaarithm.hpp>
+#include "bokeh_utils.h"
 
 using namespace std;
 using namespace cv;
 
 
-Mat create_circular_mask( int c , double r = 0) {
-    int center = int( double(c) / 2 );
-
-    int radius;
-    if ( r == 0 ) {
-        radius = std::min( center, c - center );
-    }
-    else {
-        radius = r;
-    }
-
-
-    Mat X ( Size(c,1),CV_64F );
-
-    for ( int i = 0; i < c; i ++ )
-        X.at<double>(0, i) = double(i);
-
-    Mat Y = X.t();
-
-    X = (X - center).mul(X - center);
-    Y = (Y - center).mul(Y - center);
-
-    Mat Xb, Yb;
-
-    repeat(X, c, 1, Xb);
-    repeat(Y, 1, c, Yb);
-
-    Mat dist_from_center;
-    cv::sqrt( Xb + Yb, dist_from_center );
-
-    return dist_from_center <= radius;
-
-}
-
-double compute_dof(  double f_depth, double weight = 1  ) {
-    return std::min(  double(1), weight * (  f_depth * f_depth  )  );
-}
-
-double compute_coc( double o_depth, double f_depth, double dof, double weight = 0.1 ) {
-    if ( o_depth > f_depth + dof/2 ) {
-        o_depth = o_depth - dof/2;
-    }
-    else if (  o_depth < f_depth - dof/2  ) {
-        o_depth = o_depth + dof/2;
-    }
-    else {
-        o_depth = f_depth;
-    }
-
-    double re = weight * std::abs( f_depth - o_depth  );
-
-    return std::min( 1.0, re);
-}
-
-Mat bokeh_rendering( string input_path, string depth_map_path, double f_depth, double weight_coc = 0.05, double weight_dof = 1, string kernel_path = "" ) {
-
-    tbb::spin_rw_mutex blur_m, w_m;
+Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_depth, double weight_coc = 0.05, double weight_dof = 1, const string& kernel_path = "", int level = 12, double bokeh_level = 3, double cover = 1 ) {
 
     Mat depth_map = imread( depth_map_path, IMREAD_GRAYSCALE );
     depth_map.convertTo(depth_map, CV_64F);
-    depth_map = 1 - (depth_map / 255.);
-
-    cv::Scalar mean, stddev;
-    cv::meanStdDev(depth_map, mean, stddev);
-    double depth_std = stddev[0];
-    Mat kernel = imread(kernel_path,IMREAD_GRAYSCALE);
-    kernel.convertTo(kernel, CV_64F, 1./255.);
-
 
     Mat img = imread( input_path, CV_64F );
     img.convertTo(img, CV_64F);
 
-    cv::pow(img, 3., img);
+    int n = kernel_path.length();
+    char * kernel_path_array = (char *)malloc( sizeof(char) * (n+1) );
 
-    Mat blur_layer = Mat(cv::Size(img.size[1], img.size[0]), CV_64FC3, Scalar(0. ,0., 0.));
-    Mat w = Mat(cv::Size(img.size[1], img.size[0]), CV_64FC3, Scalar(1. ,1., 1.));
+    strcpy( kernel_path_array, kernel_path.c_str() );
 
-    double DoF = compute_dof(f_depth, weight_dof);
+    clock_t start,end;
+    start=clock();
 
+    uchar* re = bokeh_rendering_approx_h( img.size[0], img.size[1], img.data, depth_map.data, f_depth,weight_coc, weight_dof, kernel_path_array, level, bokeh_level, cover  );
+    end=clock();
+    cout<<"Time spent: "<<(double)(end-start)/CLOCKS_PER_SEC<<endl;
 
+    Mat reimg = Mat( img.size[0], img.size[1], CV_8UC3, re );
 
-    tbb::parallel_for(0, img.rows, [&](int i){
-        tbb::parallel_for(0, img.cols, [&](int j){
-            double p_depth = depth_map.at<double>( i, j );
-            double d_p_coc = compute_coc( p_depth, f_depth, DoF, weight_coc );
-            int p_coc = int(d_p_coc * ( img.size[0] + img.size[1] ) * 0.5);
-            if ( p_coc == 0 ) {
-                return ;
-            }
-            if ( p_coc % 2 !=0 ) {
-                p_coc += 1;
-            }
-
-            int minx = std::max( 0, int( i - p_coc/2. ) );
-            int maxx = std::min( img.size[0] - 1, int( i + p_coc/2. ) );
-
-            int miny = std::max( 0, int( j - p_coc/2. ) );
-            int maxy = std::min( img.size[1] - 1, int( j + p_coc/2. ) );
-
-            int cmaxx = int(  std::min( p_coc + 1, p_coc + 1 - (i + p_coc/2 + 1 - img.size[0])  ));
-            int cmaxy = int(  std::min( p_coc + 1, p_coc + 1 - (j + p_coc/2 + 1 - img.size[1])  ));
-
-            Mat k;
-            resize(kernel,k,Size(p_coc + 1, p_coc + 1),0,0,INTER_NEAREST);
-
-            Mat add_mask_depth = depth_map( Range(minx, maxx+1), Range(miny, maxy+1)  )  > p_depth - depth_std;
-
-            add_mask_depth.convertTo(add_mask_depth, CV_64F, 1./255.);
-
-            Mat mask;
-
-            cv::multiply( add_mask_depth, k( Range( cmaxx-(maxx+1-minx), cmaxx ), Range(cmaxy-(maxy+1-miny), cmaxy) ), mask );
-
-            Mat mask_3d;
-            Mat in[] = {mask, mask, mask};
-            merge(in, 3, mask_3d);
-            mask_3d.convertTo(mask_3d, CV_64FC3);
-
-            blur_m.lock();
-            w( Range(minx, maxx+1), Range(miny, maxy+1) ) += mask_3d;
-            blur_m.unlock();
-
-            Mat p_color_map = Mat( Size( (maxy+1-miny), (maxx+1-minx) ), CV_64FC3, Scalar(img.at<Vec3d>(i,j)) );
-            w_m.lock();
-            blur_layer( Range( minx, maxx+1), Range(miny, maxy+1) ) += mask_3d.mul(p_color_map) ;
-            w_m.unlock();
-
-        });
-    });
-
-
-    Mat result = (img + blur_layer) / w;
-    cv::pow(result, 1./3., result);
-
-    result.convertTo(result, CV_8U);
-
-    return result;
-}
-
-
-Mat bokeh_rendering_approx( string input_path, string depth_map_path, double f_depth, double weight_coc = 0.05, double weight_dof = 1, string kernel_path = "", int level = 12, double bokeh_level = 3, double cover = 1 ) {
-
-    Mat depth_map = imread( depth_map_path, IMREAD_GRAYSCALE );
-    depth_map.convertTo(depth_map, CV_64F);
-    depth_map = 1 - (depth_map / 255.);
-
-    tbb::spin_rw_mutex w_m;
-
-    Mat kernel = imread(kernel_path,IMREAD_GRAYSCALE);
-    cv::flip(kernel, kernel, -1);
-
-    Mat img = imread( input_path, CV_64F );
-    img.convertTo(img, CV_64F);
-
-    cv::pow(img, bokeh_level, img);
-
-    struct level_info {
-        double lbound;
-        double hbound;
-        int coc;
-        level_info(double Lbound, double Hbound, int Coc) {
-            lbound = Lbound; hbound = Hbound; coc = Coc;
-        }
-    };
-
-
-    std::vector<level_info> level_infos;
-    Mat aggregate_mask;
-
-    double DoF = compute_dof(f_depth, weight_dof);
-
-    Mat w = Mat(cv::Size(img.size[1], img.size[0]), CV_64FC3, Scalar(1. ,1., 1.));
-
-    int level_count = 0;
-    for ( int i = 0; i < level; i ++ ) {
-        double lbound, hbound;
-        lbound = 1./double(level) * i;
-        hbound = 1./double(level) * (i + 1);
-
-        double d_p_coc = compute_coc( (lbound + hbound)/2, f_depth, DoF, weight_coc );
-        int p_coc = int(d_p_coc * ( img.size[0] + img.size[1] ) * 0.5);
-        if ( p_coc == 0 || p_coc == 1 ) {
-            p_coc = 0;
-        }
-        if ( p_coc % 2 ==0 ) {
-            p_coc += 1;
-        }
-
-        if ( i == 0 ) {
-            level_infos.emplace_back( lbound, hbound, p_coc );
-            level_count ++;
-        }
-        else if (  p_coc == level_infos[level_count - 1].coc  ) {
-            level_infos[level_count - 1].hbound = hbound;
-        }
-        else {
-            level_infos.emplace_back( lbound, hbound, p_coc );
-            level_count ++;
-        }
-
-    }
-
-    std::vector<Mat> src(level_count), result(level_count), level_mask(level_count);
-
-    tbb::parallel_for(0, level_count, [&](int i){
-        double lbound = level_infos.at(i).lbound;
-        double hbound = level_infos.at(i).hbound;
-
-        Mat mask;
-        if ( i != level_count - 1) {
-            cv::inRange( depth_map, lbound, hbound-0.00001, mask );
-        }
-        else {
-            cv::inRange( depth_map, lbound, hbound, mask );
-        };
-
-        mask.convertTo(mask, CV_8U);
-        mask.copyTo(level_mask.at(i));
-    });
-
-    tbb::parallel_for(0, level_count, [&](int i){
-        double lbound = level_infos.at(i).lbound;
-        double hbound = level_infos.at(i).hbound;
-        int p_coc = level_infos.at(i).coc;
-
-        Mat mask = level_mask.at(i);
-
-        img.copyTo( src.at(i));
-        src.at(i).convertTo(src.at(i), CV_64F);
-
-        Mat k;
-        resize(kernel,k,Size(p_coc, p_coc),0,0,INTER_LINEAR);
-        k.convertTo(k, CV_64F);
-        k = k / cv::sum(k  )[0] ;
-
-        Mat inter_result;
-        cv::filter2D(src.at(i), inter_result, -1, k);
-
-        Mat masked_img_1 = img.clone();
-        Mat masked_img;
-        masked_img_1.convertTo(masked_img_1,CV_64FC3, 1, 10);
-        masked_img_1.copyTo(masked_img, mask);
-
-        Mat masked_blur_img;
-        cv::filter2D(masked_img, masked_blur_img, -1, k);
-
-        Mat blur_edge_mask;
-        cv::inRange(masked_blur_img, Scalar(0.0001, 0.0001, 0.0001), Scalar(DBL_MAX, DBL_MAX, DBL_MAX), blur_edge_mask );
-
-        tbb::spin_rw_mutex blur_edge_m;
-        tbb::parallel_for(0, i, [&](int j) {
-
-            double j_lbound, j_hbound, j_depth;
-            j_lbound = level_infos.at(j).lbound;
-            j_hbound = level_infos.at(j).hbound;
-
-            j_depth = (j_lbound + j_hbound)/2;
-
-            if (  j_depth + 2./level_count * cover < (lbound + hbound)/2 ) {
-                Mat not_mask_j;
-                cv::bitwise_not(level_mask.at(j), not_mask_j);
-
-                blur_edge_m.lock();
-                cv::bitwise_and(  not_mask_j, blur_edge_mask, blur_edge_mask );
-                blur_edge_m.unlock();
-            }
-
-        });
-
-        inter_result.copyTo(result.at(i), blur_edge_mask);
-
-        Mat outer_mask;
-        Mat not_mask;
-        cv::bitwise_not(mask, not_mask);
-        cv::bitwise_and(  blur_edge_mask, not_mask, outer_mask );
-
-        Mat outer_mask_3d;
-        Mat in[] = {outer_mask, outer_mask, outer_mask};
-        merge(in, 3, outer_mask_3d);
-        outer_mask_3d.convertTo(outer_mask_3d, CV_64F, 1./255.);
-
-        w_m.lock();
-        w += outer_mask_3d;
-        w_m.unlock();
-
-
-    });
-
-    Mat final_result = result.at(0).clone();
-
-    final_result.convertTo(final_result, CV_64F);
-
-    for( int i = 1; i < level_count; i ++  ) {
-
-        final_result += result.at(i);
-
-    }
-
-    final_result = final_result / w;
-
-    cv::pow(final_result, 1./bokeh_level, final_result);
-
-    final_result.convertTo(final_result, CV_8U);
-
-    return final_result;
+    return reimg;
 
 }
 
 
 int main() {
 
-    clock_t start,end;
-    start=clock();
-    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\source.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth.png", 0.4, 0.08 ,2, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_4.png", 12);
-    end=clock();
-    cout<<"Time spent: "<<(double)(end-start)/CLOCKS_PER_SEC<<endl;
+    Mat result = bokeh_rendering_approx("H:\\ECE496\\blur\\Bokeh_from_depth\\source.jpg", "H:\\ECE496\\blur\\Bokeh_from_depth\\depth.png", 0.2, 0.02 ,1, "H:\\ECE496\\blur\\Bokeh_from_depth\\kernel_6.png", 12, 3, 1);
+
 
     imwrite("H:\\ECE496\\blur\\Bokeh_from_depth\\result.png", result);
+
+    free( result.data );
 
     return 0;
 }
