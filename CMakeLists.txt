@@ -13,12 +13,22 @@ add_library(bokeh_from_depth_lib SHARED bokeh_utils.h bokeh_utils.cpp)
 set(OpenCV_DIR H:\\opencv-4.5.3-build)
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
-target_link_libraries(bokeh_from_depth ${OpenCV_LIBS})
-target_link_libraries(bokeh_from_depth_lib ${OpenCV_LIBS})
+#target_link_libraries(bokeh_from_depth ${OpenCV_LIBS})
+#target_link_libraries(bokeh_from_depth_lib ${OpenCV_LIBS})
 
 find_package(TBB REQUIRED)
-target_link_libraries(bokeh_from_depth "D:\\tbb\\lib\\intel64\\vc14\\tbb.lib")
-target_link_libraries(bokeh_from_depth_lib "D:\\tbb\\lib\\intel64\\vc14\\tbb.lib")
+#target_link_libraries(bokeh_from_depth "D:\\tbb\\lib\\intel64\\vc14\\tbb.lib")
+#target_link_libraries(bokeh_from_depth_lib "D:\\tbb\\lib\\intel64\\vc14\\tbb.lib")
+
+set( CMAKE_PREFIX_PATH "H:\\ECE496\\libtorch" )
+include_directories( "H:\\ECE496\\libtorch\\include" )
+include_directories( "H:\\ECE496\\libtorch\\include\\torch\\csrc\\api\\include" )
+find_package( Torch REQUIRED )
+
+target_link_libraries(bokeh_from_depth "${TORCH_LIBRARIES}" "D:\\tbb\\lib\\intel64\\vc14\\tbb.lib" "${OpenCV_LIBS}")
+target_link_libraries(bokeh_from_depth_lib "${TORCH_LIBRARIES}" "D:\\tbb\\lib\\intel64\\vc14\\tbb.lib" "${OpenCV_LIBS}")
+
+
 
 
 #FIND_PACKAGE( OpenMP REQUIRED)
